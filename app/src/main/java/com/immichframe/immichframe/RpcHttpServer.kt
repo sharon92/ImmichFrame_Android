@@ -3,6 +3,8 @@ package com.immichframe.immichframe
 import fi.iki.elonen.NanoHTTPD
 
 class RpcHttpServer(
+    private val galleryStatus: () -> String,
+    private val goTo: (String) -> Unit,
     private val onFrameActiveCommand: (Boolean) -> Unit,
     private val onNextCommand: () -> Unit,
     private val onPreviousCommand: () -> Unit,
@@ -13,6 +15,17 @@ class RpcHttpServer(
 
     override fun serve(session: IHTTPSession): Response {
         return when (session.uri) {
+            "/playback-status" -> newFixedLengthResponse(Response.Status.OK, "application/json", galleryStatus())
+            "/goto" -> {
+                val key = session.parameters["value"]?.firstOrNull().orEmpty()
+                val parts = key.split('/')
+                if (parts.size != 3 || parts.any { runCatching { java.util.UUID.fromString(it).toString() }.getOrNull() != it })
+                    newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Invalid photo")
+                else {
+                    goTo(key)
+                    newFixedLengthResponse("Queued")
+                }
+            }
             // "/dim" and "/undim" are kept as aliases for backwards compatibility
             "/off", "/dim" -> {
                 onFrameActiveCommand(false)

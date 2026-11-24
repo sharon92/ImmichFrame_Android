@@ -148,6 +148,10 @@ class MainActivity : AppCompatActivity() {
         //force dark mode
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
         super.onCreate(savedInstanceState)
+        val galleryPrefs = PreferenceManager.getDefaultSharedPreferences(this)
+        if (packageName.endsWith(".gallery") && !galleryPrefs.contains("useWebView")) {
+            galleryPrefs.edit().putBoolean("useWebView", false).apply()
+        }
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.main_view)
@@ -184,27 +188,31 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnPrevious.setOnClickListener {
-            val toast = Toast.makeText(this, "Previous", Toast.LENGTH_SHORT)
-            toast.setGravity(Gravity.CENTER_VERTICAL or Gravity.START, 0, 0)
-            toast.show()
+            if (galleryMode) showPhotoNavigation() else showControlToast("Previous", Gravity.START)
             previousAction()
         }
 
         btnPause.setOnClickListener {
-            val toast = Toast.makeText(this, "Pause", Toast.LENGTH_SHORT)
-            toast.setGravity(Gravity.CENTER, 0, 0)
-            toast.show()
+            showControlToast("Pause", Gravity.CENTER_HORIZONTAL)
             pauseAction()
         }
 
         btnNext.setOnClickListener {
-            val toast = Toast.makeText(this, "Next", Toast.LENGTH_SHORT)
-            toast.setGravity(Gravity.CENTER_VERTICAL or Gravity.END, 0, 0)
-            toast.show()
+            if (galleryMode) showPhotoNavigation() else showControlToast("Next", Gravity.END)
             nextAction()
+        }
+        if (packageName.endsWith(".gallery")) {
+            for ((button, label) in listOf(btnPrevious to "Previous", btnNext to "Next")) {
+                button.text = label
+                button.isAllCaps = false
+                button.setTextColor(Color.WHITE)
+                button.setBackgroundResource(R.drawable.photo_navigation_background)
+            }
         }
 
         rcpServer = RpcHttpServer(
+            galleryStatus = { org.json.JSONObject().put("frame", galleryId).put("current", renderedKey).toString() },
+            goTo = { key -> runOnUiThread { if (!useWebView && ::serverSettings.isInitialized) loadGallery(key, 0) } },
             onFrameActiveCommand = { active -> runOnUiThread { setFrameActive(active) } },
             onNextCommand = { runOnUiThread { nextAction() } },
             onPreviousCommand = { runOnUiThread { previousAction() } },
@@ -413,7 +421,77 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val hidePhotoNavigation = Runnable {
+        btnPrevious.visibility = View.GONE
+        btnNext.visibility = View.GONE
+    }
+
+    private fun showPhotoNavigation() {
+        if (!galleryMode || renderedKey.isEmpty() || dimOverlay.isVisible) return
+        btnPrevious.visibility = View.VISIBLE
+        btnNext.visibility = View.VISIBLE
+        handler.removeCallbacks(hidePhotoNavigation)
+        handler.postDelayed(hidePhotoNavigation, 5_000)
+    }
+
+    private fun showControlToast(text: String, gravity: Int) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).apply {
+            setGravity(Gravity.CENTER_VERTICAL or gravity, 0, 0)
+            show()
+        }
+    }
+
+    private val galleryMode get() = packageName.endsWith(".gallery") && !useWebView
+    private val galleryId by lazy {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        prefs.getString("galleryId", null) ?: java.util.UUID.randomUUID().toString().also {
+            prefs.edit().putString("galleryId", it).apply()
+        }
+    }
+    @Volatile private var renderedKey = ""
+    private var galleryJob: Job? = null
+
+    private fun loadGallery(from: String, step: Int, restore: Boolean = false) {
+        val wasPlaying = isImageTimerRunning
+        stopVideo()
+        galleryJob?.cancel()
+        galleryJob = lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    try {
+                        GalleryImage.load(serverBaseUrl, serverAuthSecret, galleryId, from, step)
+                    } catch (missing: GalleryImage.PhotoMissing) {
+                        if (!restore) throw missing
+                        GalleryImage.load(serverBaseUrl, serverAuthSecret, galleryId, "", 0)
+                    }
+                }
+                ensureActive()
+                zoomAnimator?.cancel()
+                imageView2.visibility = View.GONE
+                imageView1.apply {
+                    animate().cancel()
+                    alpha = 1f
+                    scaleX = 1f
+                    scaleY = 1f
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    visibility = View.VISIBLE
+                    setImageBitmap(result.second)
+                }
+                txtPhotoInfo.text = ""
+                renderedKey = result.first
+                PreferenceManager.getDefaultSharedPreferences(this@MainActivity).edit()
+                    .putString("galleryCursor", renderedKey).apply()
+                if (wasPlaying && isImageTimerRunning) { stopImageTimer(); startImageTimer() }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { Log.w("Gallery", "Gallery image unavailable", e) }
+        }
+    }
+
     private fun getNextImage() {
+        if (galleryMode) {
+            loadGallery(renderedKey, if (renderedKey.isEmpty()) 0 else 1)
+            return
+        }
         stopVideo()
         val next = assetQueue.removeFirstOrNull()
         when {
@@ -683,9 +761,19 @@ class MainActivity : AppCompatActivity() {
         webView.visibility = if (useWebView) View.VISIBLE else View.GONE
         imageView1.visibility = if (useWebView) View.GONE else View.VISIBLE
         imageView2.visibility = if (useWebView) View.GONE else View.VISIBLE
-        btnPrevious.visibility = if (useWebView) View.GONE else View.VISIBLE
-        btnPause.visibility = if (useWebView) View.GONE else View.VISIBLE
-        btnNext.visibility = if (useWebView) View.GONE else View.VISIBLE
+        handler.removeCallbacks(hidePhotoNavigation)
+        val showLegacyControls = !useWebView && !galleryMode
+        btnPrevious.isVisible = showLegacyControls
+        btnPause.isVisible = showLegacyControls
+        btnNext.isVisible = showLegacyControls
+        for (imageView in listOf(imageView1, imageView2)) {
+            if (galleryMode) {
+                imageView.setOnClickListener { showPhotoNavigation() }
+            } else {
+                imageView.setOnClickListener(null)
+                imageView.isClickable = false
+            }
+        }
         swipeRefreshLayout.isEnabled = !settingsLock
         txtPhotoInfo.visibility = View.GONE //enabled in onSettingsLoaded based on server settings
         txtDateTime.visibility = View.GONE //enabled in onSettingsLoaded based on server settings
@@ -832,7 +920,8 @@ class MainActivity : AppCompatActivity() {
             txtDateTime.visibility = View.GONE
         }
 
-        getNextImage()
+        val saved = PreferenceManager.getDefaultSharedPreferences(this).getString("galleryCursor", "").orEmpty()
+        if (galleryMode) loadGallery(saved, 0, restore = true) else getNextImage()
         startImageTimer()
 
         if (serverSettings.showWeatherDescription) {
@@ -850,6 +939,10 @@ class MainActivity : AppCompatActivity() {
             val event = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_LEFT)
             dispatchKeyEvent(event)
         } else {
+            if (galleryMode) {
+                loadGallery(renderedKey, -1)
+                return
+            }
             // During a video, the last image shown is currentImage, not previousImage
             val safePreviousImage = if (isPlayingVideo) currentImage else previousImage
             if (safePreviousImage != null) {
@@ -870,6 +963,8 @@ class MainActivity : AppCompatActivity() {
             webView.requestFocus()
             val event = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT)
             dispatchKeyEvent(event)
+        } else if (galleryMode) {
+            loadGallery(renderedKey, 1)
         } else {
             stopImageTimer()
             getNextImage()

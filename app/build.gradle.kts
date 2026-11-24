@@ -36,6 +36,7 @@ android {
     }
 
     buildTypes {
+        debug { applicationIdSuffix = ".gallery" }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
