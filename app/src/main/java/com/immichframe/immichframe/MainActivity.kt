@@ -35,6 +35,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
@@ -66,9 +67,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var videoView: VideoView
     private lateinit var txtPhotoInfo: TextView
     private lateinit var txtDateTime: TextView
-    private lateinit var btnPrevious: Button
+    private lateinit var btnPrevious: ImageButton
     private lateinit var btnPause: Button
-    private lateinit var btnNext: Button
+    private lateinit var btnNext: ImageButton
     private lateinit var dimOverlay: View
     private lateinit var swipeRefreshLayout: View
     private lateinit var serverSettings: Helpers.ServerSettings
@@ -202,12 +203,8 @@ class MainActivity : AppCompatActivity() {
             nextAction()
         }
         if (packageName.endsWith(".gallery")) {
-            for ((button, label) in listOf(btnPrevious to "Previous", btnNext to "Next")) {
-                button.text = label
-                button.isAllCaps = false
-                button.setTextColor(Color.WHITE)
-                button.setBackgroundResource(R.drawable.photo_navigation_background)
-            }
+            btnPrevious.setImageResource(R.drawable.photo_previous)
+            btnNext.setImageResource(R.drawable.photo_next)
         }
 
         rcpServer = RpcHttpServer(

@@ -3,4 +3,6 @@
     <string name="device_admin_description">Allows ImmichFrame to turn off the screen and let the
         device sleep during inactive hours defined in the Active Schedule.</string>
     <string name="active_schedule_always">Always active — tap to add rules</string>
+    <string name="photo_previous">Previous photo</string>
+    <string name="photo_next">Next photo</string>
 </resources>
