@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import org.json.JSONObject
+import okhttp3.Request
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -11,8 +12,17 @@ import kotlin.math.roundToInt
 
 internal object GalleryImage {
     class PhotoMissing : IllegalStateException("Photo is no longer in the gallery")
-    fun load(base: String, secret: String, frame: String, cursor: String, step: Int): Pair<String, Bitmap> {
+    fun load(base: String, secret: String, frame: String, cursor: String, step: Int,
+             cloudflare: CloudflareConnection?): Pair<String, Bitmap> {
         fun read(path: String): ByteArray {
+            if (cloudflare != null) {
+                val request = Request.Builder().url(cloudflare.url("gallery" + path)).build()
+                return cloudflare.client.newCall(request).execute().use { response ->
+                    if (path.startsWith("?from=") && response.code == 404) throw PhotoMissing()
+                    check(response.code == 200) { "Gallery HTTP ${response.code}" }
+                    requireNotNull(response.body).bytes()
+                }
+            }
             val connection = URL(base + "api/gallery" + path).openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false

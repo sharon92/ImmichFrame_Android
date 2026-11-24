@@ -89,6 +89,9 @@ class MainActivity : AppCompatActivity() {
     // Native video: upcoming assets from api/Asset decide when a video slot comes up
     private val assetQueue = ArrayDeque<Helpers.AssetSummary>()
     private var serverBaseUrl = ""
+    private var cloudflareConnection: CloudflareConnection? = null
+    private var cloudflarePolling: Job? = null
+    private var settingsRevision = 0
     private var serverAuthSecret = ""
     private var isPlayingVideo = false
     // Bumped on every settings load so api/Asset responses from an earlier session are dropped
@@ -217,7 +220,6 @@ class MainActivity : AppCompatActivity() {
             onSettingsCommand = { runOnUiThread { settingsAction() } },
             onBrightnessCommand = { brightness -> runOnUiThread { screenBrightnessAction(brightness) } },
         )
-        rcpServer.start()
 
         registerReceiver(
             screenStateReceiver,
@@ -438,7 +440,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val galleryMode get() = packageName.endsWith(".gallery") && !useWebView
+    private val galleryMode get() = !useWebView &&
+        (cloudflareConnection != null || packageName.endsWith(".gallery"))
     private val galleryId by lazy {
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
         prefs.getString("galleryId", null) ?: java.util.UUID.randomUUID().toString().also {
@@ -450,16 +453,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadGallery(from: String, step: Int, restore: Boolean = false) {
         val wasPlaying = isImageTimerRunning
+        val base = serverBaseUrl
+        val secret = serverAuthSecret
+        val cloud = cloudflareConnection
         stopVideo()
         galleryJob?.cancel()
         galleryJob = lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     try {
-                        GalleryImage.load(serverBaseUrl, serverAuthSecret, galleryId, from, step)
+                        GalleryImage.load(base, secret, galleryId, from, step, cloud)
                     } catch (missing: GalleryImage.PhotoMissing) {
                         if (!restore) throw missing
-                        GalleryImage.load(serverBaseUrl, serverAuthSecret, galleryId, "", 0)
+                        GalleryImage.load(base, secret, galleryId, "", 0, cloud)
                     }
                 }
                 ensureActive()
@@ -481,6 +487,45 @@ class MainActivity : AppCompatActivity() {
                 if (wasPlaying && isImageTimerRunning) { stopImageTimer(); startImageTimer() }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { Log.w("Gallery", "Gallery image unavailable", e) }
+        }
+    }
+
+    private fun startCloudflarePolling(connection: CloudflareConnection) {
+        cloudflarePolling = lifecycleScope.launch {
+            while (isActive) {
+                val current = renderedKey
+                val frame = galleryId
+                val delayMillis = try {
+                    val command = withContext(Dispatchers.IO) { connection.checkIn(frame, current) }
+                    when (command?.optString("command")) {
+                        "next" -> nextAction()
+                        "previous" -> previousAction()
+                        "pause" -> pauseAction()
+                        "dim" -> setFrameActive(false)
+                        "undim" -> setFrameActive(true)
+                        "settings" -> settingsAction()
+                        "brightness" -> {
+                            val value = command.optDouble("value")
+                            if (value == -1.0 || value in 0.0..1.0) screenBrightnessAction(value.toFloat())
+                        }
+                        "goto" -> {
+                            val key = command.optString("key")
+                            val parts = key.split('/')
+                            if (parts.size == 3 && parts.all {
+                                runCatching { java.util.UUID.fromString(it).toString() }.getOrNull() == it
+                            }) loadGallery(key, 0)
+                        }
+                    }
+                    if (command != null) galleryJob?.join()
+                    2000L
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    Log.w("Cloudflare", "Frame check-in failed: ${failure.javaClass.simpleName}")
+                    5000L
+                }
+                delay(delayMillis)
+            }
         }
     }
 
@@ -689,16 +734,19 @@ class MainActivity : AppCompatActivity() {
         retryDelayMillis: Long = 5000
     ) {
         var retryCount = 0
+        val revision = settingsRevision
+        val service = apiService
 
         fun attemptFetch() {
-            if (useWebView) {
+            if (useWebView || revision != settingsRevision || isDestroyed) {
                 return
             }
-            apiService.getServerSettings().enqueue(object : Callback<Helpers.ServerSettings> {
+            service.getServerSettings().enqueue(object : Callback<Helpers.ServerSettings> {
                 override fun onResponse(
                     call: Call<Helpers.ServerSettings>,
                     response: Response<Helpers.ServerSettings>
                 ) {
+                    if (revision != settingsRevision || isDestroyed) return
                     if (response.isSuccessful) {
                         val serverSettingsResponse = response.body()
                         if (serverSettingsResponse != null) {
@@ -707,26 +755,30 @@ class MainActivity : AppCompatActivity() {
                             handleFailure(Exception("Empty response body"))
                         }
                     } else {
+                        if (cloudflareConnection != null && retryCount == 0)
+                            Log.w("Cloudflare", "Server settings request returned HTTP ${response.code()}")
                         handleFailure(Exception("HTTP ${response.code()}: ${response.message()}"))
                     }
                 }
 
                 override fun onFailure(call: Call<Helpers.ServerSettings>, t: Throwable) {
+                    if (cloudflareConnection != null && retryCount == 0)
+                        Log.w("Cloudflare", "Server settings request failed: ${t.javaClass.simpleName}")
                     handleFailure(t)
                 }
 
                 private fun handleFailure(t: Throwable) {
-                    if (useWebView) {
+                    if (useWebView || revision != settingsRevision || isDestroyed) {
                         return
                     }
                     if (retryCount < maxRetries) {
                         retryCount++
-                        Toast.makeText(
+                        if (cloudflareConnection == null || retryCount == 1) Toast.makeText(
                             this@MainActivity,
                             "Retrying to fetch server settings... Attempt $retryCount of $maxRetries",
                             Toast.LENGTH_SHORT
                         ).show()
-                        Handler(Looper.getMainLooper()).postDelayed({
+                        handler.postDelayed({
                             attemptFetch()
                         }, retryDelayMillis)
                     } else {
@@ -742,11 +794,34 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun loadSettings() {
         val prefs = PreferenceManager.getDefaultSharedPreferences(applicationContext)
+        settingsRevision++
+        cloudflarePolling?.cancel()
+        galleryJob?.cancel()
+        stopImageTimer()
+        cloudflareConnection = null
         blurredBackground = prefs.getBoolean("blurredBackground", true)
         showCurrentDate = prefs.getBoolean("showCurrentDate", true)
         var savedUrl = prefs.getString("webview_url", "") ?: ""
         useWebView = prefs.getBoolean("useWebView", true)
         val authSecret = prefs.getString("authSecret", "") ?: ""
+        if (prefs.getBoolean("cloudflareMode", false)) {
+            rcpServer.stop()
+            useWebView = false
+            try {
+                cloudflareConnection = CloudflareConnection(
+                    savedUrl, authSecret, prefs.getString("cloudflareClientId", "").orEmpty().trim(),
+                    prefs.getString("cloudflareClientSecret", "").orEmpty().trim(),
+                    prefs.getString("cloudflareDeviceKey", "").orEmpty().trim()
+                )
+                savedUrl = cloudflareConnection!!.origin.toString()
+            } catch (invalid: IllegalArgumentException) {
+                Log.w("Cloudflare", "Cloudflare mode settings are incomplete or the server URL is invalid.")
+                Toast.makeText(this, invalid.message, Toast.LENGTH_LONG).show()
+                return
+            }
+        } else if (!rcpServer.isAlive) {
+            rcpServer.start()
+        }
         val settingsLock = prefs.getBoolean("settingsLock", false)
         val activeTimes = prefs.getBoolean("activeTimes", false)
 
@@ -863,12 +938,14 @@ class MainActivity : AppCompatActivity() {
         } else {
             serverBaseUrl = if (savedUrl.endsWith("/")) savedUrl else "$savedUrl/"
             serverAuthSecret = authSecret
-            retrofit = Helpers.createRetrofit(savedUrl, authSecret)
+            val cloud = cloudflareConnection
+            retrofit = Helpers.createRetrofit(savedUrl, authSecret, cloud)
             apiService = retrofit!!.create(Helpers.ApiService::class.java)
             getServerSettings(
                 onSuccess = { settings ->
                     serverSettings = settings
                     onSettingsLoaded()
+                    if (cloud != null) startCloudflarePolling(cloud)
                 },
                 onFailure = { error ->
                     Toast.makeText(
@@ -876,7 +953,8 @@ class MainActivity : AppCompatActivity() {
                         "Failed to load server settings: ${error.localizedMessage}",
                         Toast.LENGTH_SHORT
                     ).show()
-                }
+                },
+                maxRetries = if (cloud == null) 36 else Int.MAX_VALUE
             )
         }
     }
@@ -1303,6 +1381,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cloudflarePolling?.cancel()
         rcpServer.stop()
         stopVideo()
         unregisterReceiver(screenStateReceiver)

@@ -169,10 +169,10 @@ object Helpers {
         fun getWeather(): Call<Weather>
     }
 
-    fun createRetrofit(baseUrl: String, authSecret: String): Retrofit {
+    internal fun createRetrofit(baseUrl: String, authSecret: String, cloudflare: CloudflareConnection? = null): Retrofit {
         val normalizedBaseUrl = if (!baseUrl.endsWith("/")) "$baseUrl/" else baseUrl
 
-        val client = OkHttpClient.Builder().addInterceptor { chain ->
+        val client = cloudflare?.client ?: OkHttpClient.Builder().addInterceptor { chain ->
             val originalRequest = chain.request()
 
             val request = if (authSecret.isNotEmpty()) {

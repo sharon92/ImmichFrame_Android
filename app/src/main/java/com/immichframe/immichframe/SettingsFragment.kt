@@ -32,9 +32,10 @@ class SettingsFragment : PreferenceFragmentCompat() {
 
 
         //obfuscate the authSecret
-        val authPref = findPreference<EditTextPreference>("authSecret")
-        authPref?.setOnBindEditTextListener { editText ->
-            editText.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        for (key in listOf("authSecret", "cloudflareClientSecret", "cloudflareDeviceKey")) {
+            findPreference<EditTextPreference>(key)?.setOnBindEditTextListener { editText ->
+                editText.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
         }
 
         // Update visibility based on switches

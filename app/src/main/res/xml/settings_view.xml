@@ -10,6 +10,23 @@
             android:defaultValue=""
             android:key="authSecret"
             android:title="Authorization Secret" />
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="cloudflareMode"
+            android:title="Cloudflare mode"
+            android:summary="Connect to the gallery and receive commands over HTTPS" />
+        <EditTextPreference
+            android:dependency="cloudflareMode"
+            android:key="cloudflareClientId"
+            android:title="Cloudflare Access Client ID" />
+        <EditTextPreference
+            android:dependency="cloudflareMode"
+            android:key="cloudflareClientSecret"
+            android:title="Cloudflare Access Client Secret" />
+        <EditTextPreference
+            android:dependency="cloudflareMode"
+            android:key="cloudflareDeviceKey"
+            android:title="ImmichFrame device key" />
     </PreferenceCategory>
 
     <PreferenceCategory android:title="Display Options">
